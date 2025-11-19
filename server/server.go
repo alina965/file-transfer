@@ -46,7 +46,7 @@ func (s *Server) start(port string) error {
 	s.listener = listener
 
 	signalCh := make(chan os.Signal, 1)
-	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM) // better in main function, because server shouldn't know about close triggers
 
 	done := make(chan struct{})
 
@@ -62,7 +62,7 @@ func (s *Server) start(port string) error {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			s.mu.RLock()
+			s.mu.RLock() // better escape unnecessary mutexes
 			closing := s.closing
 			s.mu.RUnlock()
 
@@ -231,16 +231,40 @@ func (s *Server) receiveFileContent(conn net.Conn, fileName string, fileSize int
 		}
 	}()
 
-	received, err := io.CopyN(file, progressReader, fileSize)
-	if err != nil {
-		os.Remove(filePath)
-		return received, fmt.Errorf("error receiving file content: %v", err)
+	buffer := make([]byte, 128*1024)
+	var totalReceived int64
+
+	for totalReceived < fileSize {
+		remaining := fileSize - totalReceived
+		bytesToRead := int64(len(buffer))
+		if remaining < bytesToRead {
+			bytesToRead = remaining
+		}
+
+		bytesRead, err := progressReader.Read(buffer[:bytesToRead])
+		if err != nil {
+			os.Remove(filePath)
+			return totalReceived, fmt.Errorf("error reading: %v", err)
+		}
+
+		_, err = file.Write(buffer[:bytesRead])
+		if err != nil {
+			os.Remove(filePath)
+			return totalReceived, fmt.Errorf("error writing to file: %v", err)
+		}
+
+		totalReceived += int64(bytesRead)
+
+		if totalReceived > fileSize {
+			os.Remove(filePath)
+			return totalReceived, fmt.Errorf("file size exceeded: expected %d, got %d", fileSize, totalReceived)
+		}
 	}
 
 	done <- true
 	monitor.CheckAndPrint()
 
-	return received, nil
+	return totalReceived, nil
 }
 
 type ProgressReader struct {
